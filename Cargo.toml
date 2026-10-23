@@ -1,0 +1,73 @@
+[package]
+name = "qishell"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+description = "Qi Shell: SSH workspace"
+build = "build.rs"
+
+[dependencies]
+aes-gcm = { version = "0.11", features = ["zeroize"] }
+alacritty_terminal = "0.26"
+anyhow = "1"
+async-channel = "2"
+async-io = "2"
+chrono = "0.4"
+dirs = "6"
+dunce = "1"
+futures = "0.3"
+# 精确锁定，避免 caret 把 GPUI 解析到 API 不同的版本。gpui-base / gpui-component
+# / gpui-component-macros / gpui-kit-assets 由 gpui-kit 传递引入，本项目不直接
+# 引用，不必在这里重复声明。
+gpui-pre = "=0.3.2"
+gpui-kit = "=0.6.1"
+image = "0.25"
+percent-encoding = "2"
+rand = "0.9"
+rusqlite = { version = "0.40", features = ["bundled"] }
+russh = "0.63"
+russh-sftp = "3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# 与 russh 用同一套 rand_core（0.10），生成私钥时不必另引一套随机源。
+ssh-key = { version = "0.7.0-rc.11", features = ["getrandom", "ed25519", "rand_core"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+trash = "5"
+unicode-width = "0.2"
+zeroize = "1"
+
+[build-dependencies]
+# 把 exe 图标作为资源 ID 1 编进去；Windows 后端的窗口图标只认这一处。
+embed-resource = "3.0"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.6.1", features = ["test-support"] }
+tempfile = "3"
+
+# debug 构建开 O1：解码 + 缩放 4K 壁纸从 3.8s 降到约 0.25s，增量编译仍只要
+# 几秒。gpui 系列走下面的全优化。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+swash = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+resvg = { opt-level = 3 }
+usvg = { opt-level = 3 }
+zed-font-kit = { opt-level = 3 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

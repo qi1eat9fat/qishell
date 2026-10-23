@@ -1,0 +1,17 @@
+# 构建产物
+target/
+dist/
+
+# 本地数据目录：便携版运行时生成的数据库、密钥、known_hosts 与壁纸
+data/
+
+# 字体字符清单脚本的中间产物
+assets/fonts/.charset.txt
+
+# 编辑器与系统杂项
+.DS_Store
+Thumbs.db
+*.swp
+
+# 开发期截图：含测试主机的内网地址，且是改名前的旧界面
+docs/screenshots/
