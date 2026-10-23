@@ -1,3 +1,0 @@
-// 应用图标资源。ID 必须是 1：gpui 的 Windows 后端用 LoadImageW 取 "1" 号图标，
-// 改名或换号会让窗口与任务栏退回系统默认图标。
-1 ICON "assets/qishell.ico"
