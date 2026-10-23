@@ -347,6 +347,53 @@ fn saves_a_host_through_the_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_flag_typed_into_the_name_field_is_shown_as_a_picture(cx: &mut TestAppContext) {
+    let (workspace, window) = open_workspace(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("new-host", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // `subscribe_in` 的订阅是惰性的：`new_subscription` 用 `defer` 激活它，
+    // 而 defer 要等这一轮 update 结束才跑。对话框和输入必须分在两轮里，
+    // 否则订阅还没生效就开始打字。
+    settle(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("host-name", cx);
+        // 输入框画不了国旗（区域指示符在 Windows 上没有彩色轮廓），所以敲
+        // 进去的旗要立刻从文字里摘出来，另画成图片；输入框只留名字本身。
+        window.input("\u{1F1ED}\u{1F1F0}lab box", cx);
+    })
+    .unwrap();
+    // 摘旗在订阅回调里做，回调由 `flush_effects` 派发，而它只在这一轮
+    // update 结束时运行——所以要在下一轮里看结果。
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("host-name").value(),
+            Some("lab box"),
+            "the flag must not stay in the input text"
+        );
+        window.click("host-address", cx);
+        window.input("10.9.9.12", cx);
+        window.click("save-host", cx);
+        window.render_frame(cx);
+
+        // 保存时旗要接回名字前面，用户看到的和存下来的一致。
+        let workspace = workspace.read(cx);
+        assert!(
+            workspace
+                .test_host(cx, "\u{1F1ED}\u{1F1F0}lab box")
+                .is_some(),
+            "the saved name keeps its leading flag"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn a_new_host_opens_a_tab_after_saving(cx: &mut TestAppContext) {
     let (workspace, window) = open_workspace(cx);
     cx.update_window(window.into(), |_, window, cx| {
@@ -418,6 +465,39 @@ fn switches_the_authentication_method(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_key_field_lists_imported_keys_beside_browsing_for_a_file(cx: &mut TestAppContext) {
+    // 私钥不能只是一个文件输入框：已经导入到 `keys/` 的密钥要能直接选。
+    // 这里只验证下拉里同时有「已导入的密钥」和「浏览文件…」两类选项，
+    // 文件对话框本身由系统弹出，测试里不点它。
+    let (_workspace, window) = open_workspace(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("new-host", cx);
+        window.render_frame(cx);
+        window.click("auth-method-密钥", cx);
+        window.render_frame(cx);
+
+        // 下拉触发器在，且显示的是占位文字（还没选私钥）。
+        let trigger = window.find("host-key-path");
+        assert_eq!(trigger.label(), Some("私钥文件"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_key_already_in_the_key_dir_is_used_as_is(_cx: &mut TestAppContext) {
+    // 从下拉里选已导入的私钥时，`adopt_key` 不该再复制一份——它已经在
+    // `keys/` 里了，原样返回即可。
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    let key = keys.join("test_key");
+    std::fs::write(&key, b"placeholder").unwrap();
+
+    assert_eq!(qishell::ssh::vault::adopt_key(&keys, &key), Some(key));
 }
 
 #[gpui_kit::test]

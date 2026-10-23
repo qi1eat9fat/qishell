@@ -7,6 +7,7 @@ pub mod emoji;
 pub mod field;
 pub mod flags;
 pub mod icons;
+pub mod key_choice;
 pub mod layout;
 pub mod overlay;
 pub mod slider;

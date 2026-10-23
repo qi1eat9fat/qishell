@@ -953,11 +953,22 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .overflow_hidden()
-            .bg(theme::workspace_glass(tokens.glass))
             .when(has_tab, |workspace| {
                 workspace.child(self.render_tab_bar(tokens, cx))
             })
-            .child(content)
+            // 玻璃只铺在内容区，不能铺在这个纵向容器上：标签栏自己也铺一层
+            // 玻璃，父容器再铺就成了玻璃叠玻璃，标签栏的实际不透明度远高于
+            // `tab_bar` 的声明值（0.56 叠在 0.50 上约等于 0.78），看上去比
+            // 左右两侧亮一整块。
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .bg(theme::workspace_glass(tokens.glass))
+                    .child(content),
+            )
     }
 
     /// 右侧栏：设置与 SFTP 两个入口，图标不随选中态变色。

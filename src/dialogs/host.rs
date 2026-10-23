@@ -1,16 +1,19 @@
 //! 新建/编辑主机对话框。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::{
     Disableable as _, WindowExt as _, h_flex,
     input::{InputContentType, InputState, TextareaState},
+    searchable_list::{SearchableGroup, SearchableVec},
+    select::{SelectEvent, SelectState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::components::{button, dialog, field};
+use crate::components::{button, dialog, field, key_choice::KeyChoice};
 use crate::host::{AuthKind, DEFAULT_USER, Host, HostDraft, HostId, SSH_PORT};
 use crate::theme;
 use crate::workspace::Workspace;
@@ -34,7 +37,11 @@ pub struct HostForm {
     port: Entity<InputState>,
     notes: Entity<TextareaState>,
     password: Entity<InputState>,
-    key_path: Entity<InputState>,
+    /// 私钥下拉：已导入的密钥 + 「浏览文件…」。
+    key_choice: Entity<SelectState<SearchableVec<SearchableGroup<KeyChoice>>>>,
+    /// 当前选中的私钥路径（`keys/` 里的，或用户从别处挑的）。下拉只是入口，
+    /// 真正要保存的是这个值。
+    key_path: Option<PathBuf>,
     key_passphrase: Entity<InputState>,
     auth: AuthKind,
     errors: Errors,
@@ -81,15 +88,12 @@ impl HostForm {
             .unwrap_or_default();
         // 库里存的是数据目录内的相对路径（拷走文件夹还能用），输入框里
         // 显示解析后的完整路径——相对路径没法照着去文件管理器里找。
+        // 库里存的是数据目录内的相对路径，这里解析成绝对路径再和 `keys/`
+        // 里的条目比对。
         let key_path = host
             .as_ref()
             .and_then(|host| host.key_path.as_deref())
-            .map(|path| {
-                crate::app::paths::resolve(std::path::Path::new(path))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_default();
+            .map(|path| crate::app::paths::resolve(Path::new(path)));
         let key_passphrase = String::new();
         let auth = host
             .as_ref()
@@ -134,11 +138,19 @@ impl HostForm {
                         "留空则在连接时询问"
                     })
             }),
-            key_path: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(key_path)
-                    .placeholder("未选择私钥文件")
-            }),
+            key_choice: {
+                let keys = crate::components::key_choice::stored_keys();
+                // 选中项按路径在「已导入」组里的下标定位；不在里面（别处的
+                // 文件）就不预选，下拉显示占位文字。
+                let index = key_path.as_deref().and_then(|path| {
+                    keys.iter()
+                        .position(|key| key.path == path)
+                        .map(|row| IndexPath::default().row(row))
+                });
+                let choices = crate::components::key_choice::key_choices(keys);
+                cx.new(|cx| SelectState::new(choices, index, window, cx))
+            },
+            key_path,
             key_passphrase: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
@@ -170,7 +182,6 @@ impl HostForm {
             self.user.clone(),
             self.port.clone(),
             self.password.clone(),
-            self.key_path.clone(),
             self.key_passphrase.clone(),
         ];
         for field in fields {
@@ -186,6 +197,63 @@ impl HostForm {
                     }
                 },
             ));
+        }
+        // 私钥下拉：选已导入的密钥就记下路径；选「浏览文件…」不改选择，
+        // 直接开系统对话框（`select_key` 会把结果写回下拉）。
+        self._subscriptions.push(cx.subscribe_in(
+            &self.key_choice,
+            window,
+            |this,
+             _,
+             event: &SelectEvent<SearchableVec<SearchableGroup<KeyChoice>>>,
+             window,
+             cx| {
+                let SelectEvent::Confirm(Some(choice)) = event else {
+                    return;
+                };
+                match choice {
+                    KeyChoice::Browse => this.choose_key(window, cx),
+                    choice => {
+                        this.key_path = choice.path().map(|path| path.to_path_buf());
+                        this.test_result = None;
+                        cx.notify();
+                    }
+                }
+            },
+        ));
+        // 名称里敲进去的国旗要立刻从文字里摘出来另画（输入框画不了国旗）。
+        // 订阅 Change 而不是 observe：`set_value` 内部把 `emit_events` 关掉，
+        // 摘旗时写回文字不会再触发一次回调；observe 看的是 notify，会多跑一轮。
+        self._subscriptions.push(cx.subscribe_in(
+            &self.name,
+            window,
+            |this, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    this.absorb_typed_flags(window, cx);
+                }
+            },
+        ));
+    }
+
+    /// 把输入框里**开头**的国旗挪到 `name_flags`，输入框只留名字本身。
+    ///
+    /// 用户可能先敲旗再敲名字，也可能删掉重来，所以每次改动都重新对一遍；
+    /// 旗不在开头就原样留在文字里（挪到最前面会改掉用户写下的名字）。
+    /// `set_value` 会把光标放回末尾、清掉撤销栈，所以只在确实有旗时才写回。
+    ///
+    /// 名字被清空时连旗一起清掉：旗画在输入框外面，否则用户就没有办法去掉
+    /// 它了。清空后重新敲旗或名字都是干净的起点。
+    fn absorb_typed_flags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.name.read(cx).value().to_string();
+        let (flags, rest) = crate::components::emoji::take_leading_flags(&text);
+        if !flags.is_empty() {
+            self.name_flags.push_str(&flags);
+            self.name
+                .update(cx, |input, cx| input.set_value(rest, window, cx));
+            cx.notify();
+        } else if text.trim().is_empty() && !self.name_flags.is_empty() {
+            self.name_flags.clear();
+            cx.notify();
         }
     }
 
@@ -211,7 +279,6 @@ impl HostForm {
         };
         let notes = self.notes.read(cx).value().trim().to_string();
         let password = self.password.read(cx).value().to_string();
-        let key_path = self.key_path.read(cx).value().trim().to_string();
         let key_passphrase = self.key_passphrase.read(cx).value().to_string();
 
         // 用户名留空就是「用默认」：输入框里只画提示文字，不当成错误。
@@ -225,7 +292,7 @@ impl HostForm {
             name: name.is_empty(),
             address: address.is_empty(),
             port: !matches!(port, Some(1..=65535)),
-            key: self.auth == AuthKind::Key && key_path.is_empty(),
+            key: self.auth == AuthKind::Key && self.key_path.is_none(),
         };
         if self.errors.name || self.errors.address || self.errors.port || self.errors.key {
             self.submitting = false;
@@ -241,10 +308,11 @@ impl HostForm {
         // 这个文件夹，拷贝目录才带得走它。收不进来（读不了、目录不可写）就
         // 用用户给的原路径，至少这台机器上还能连。
         let key_path = if self.auth == AuthKind::Key {
-            Some(Path::new(&key_path))
-                .and_then(|path| {
+            self.key_path
+                .as_deref()
+                .map(|path| {
                     crate::ssh::vault::adopt_key(&crate::app::paths::keys_dir(), path)
-                        .or(Some(path.to_path_buf()))
+                        .unwrap_or_else(|| path.to_path_buf())
                 })
                 .map(|path| crate::app::paths::stored(&path))
         } else {
@@ -338,7 +406,7 @@ impl HostForm {
         let Some(port) = port else {
             return;
         };
-        let key_path = self.key_path.read(cx).value().trim().to_string();
+        let key_path = self.key_path.clone();
         let password = self.password.read(cx).value().to_string();
         let passphrase = self.key_passphrase.read(cx).value().to_string();
         let request = crate::connection::LoginTest {
@@ -352,8 +420,7 @@ impl HostForm {
             } else {
                 crate::host::LoginMethod::Password
             },
-            key_path: (self.auth == AuthKind::Key && !key_path.is_empty())
-                .then(|| std::path::PathBuf::from(key_path)),
+            key_path: (self.auth == AuthKind::Key).then_some(key_path).flatten(),
             password: (!password.is_empty()).then_some(password),
             passphrase: (!passphrase.is_empty()).then_some(passphrase),
         };
@@ -605,31 +672,51 @@ impl Render for HostForm {
             })
             .into_any_element(),
         );
+        // 私钥：下拉里列出 `keys/` 里已导入的密钥，末尾附「浏览文件…」。
+        // 选中「浏览文件…」不改变已选密钥，而是直接开系统对话框——它是个
+        // 动作，不是一个值。
         let key = field(
             "私钥文件",
             self.errors.key,
             Some("请选择私钥文件"),
-            h_flex()
-                .gap(px(8.))
+            v_flex()
+                .gap(px(6.))
                 .child(
-                    field::text_field_with(
+                    field::select_field(
                         "host-key-path-shell",
-                        &self.key_path,
+                        &self.key_choice,
                         window,
                         cx,
-                        |input| input.id("host-key-path").aria_label("私钥文件").w_full(),
-                    )
-                    .flex_1()
-                    .min_w_0()
-                    .into_any_element(),
-                )
-                .child(
-                    button::form_secondary("choose-key", "选择文件…").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.choose_key(window, cx);
+                        px(9999.),
+                        |select| {
+                            select
+                                .id("host-key-path")
+                                .accessibility_label("私钥文件")
+                                .placeholder("未选择私钥文件")
+                                .menu_width(px(420.))
+                                .search_placeholder("搜索密钥")
                         },
-                    )),
+                    )
+                    .w_full(),
                 )
+                // 选中的是 `keys/` 外面的文件时，把完整路径显示出来：下拉里
+                // 只有文件名，路径得让用户看得见，否则不知道用的是哪个。
+                .when_some(self.key_path.clone(), |column, path| {
+                    let imported = self
+                        .key_choice
+                        .read(cx)
+                        .selected_value()
+                        .is_some_and(|choice| matches!(choice, KeyChoice::Stored(_)));
+                    column.when(!imported, |column| {
+                        column.child(
+                            div()
+                                .text_size(theme::TYPE_META)
+                                .text_color(theme::solid(theme::OVERLAY_SUBTLE))
+                                .truncate()
+                                .child(path.to_string_lossy().into_owned()),
+                        )
+                    })
+                })
                 .into_any_element(),
         );
         let passphrase = field(
@@ -749,27 +836,46 @@ impl HostForm {
         self.name.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    fn choose_key(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// 开系统文件对话框选一把私钥。选中的文件不一定是 `keys/` 里的，所以
+    /// 作为一个「别处的文件」项塞进下拉，让当前选择在界面上有个交代。
+    fn choose_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some("选择私钥文件".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = receiver.await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let path = path.to_string_lossy().to_string();
             this.update_in(cx, |this, window, cx| {
-                this.key_path
-                    .update(cx, |input, cx| input.set_value(path, window, cx));
+                this.select_key(path, window, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// 把选中的私钥写进表单，并让下拉跟着显示它。
+    fn select_key(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let choice = KeyChoice::File(path.clone());
+        self.key_choice.update(cx, |select, cx| {
+            // 临时选的项也要能出现在下拉里，否则触发器显示的是旧的选择。
+            let mut choices = crate::components::key_choice::stored_keys();
+            choices.retain(|key| key.path != path);
+            self.key_path = Some(path.clone());
+            select.set_items(
+                crate::components::key_choice::key_choices(choices),
+                window,
+                cx,
+            );
+            select.set_selected_value(&choice, window, cx);
+        });
+        self.test_result = None;
+        cx.notify();
     }
 }
